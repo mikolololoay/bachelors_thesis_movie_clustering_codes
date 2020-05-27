@@ -1,0 +1,250 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+Zawsze będę musiał odpalać to na początku, żeby zmienić folder, w którym mają się instalować biblioteki.
+```{r}
+myPaths <- .libPaths()
+myPaths <- c(myPaths, 'D:/licencjat/bachelors_thesis_movie_clustering_codes/R_directories')
+.libPaths(myPaths)
+myPaths <- .libPaths()   # get the paths
+myPaths <- c(myPaths[3], myPaths[2], myPaths[1])  # switch them
+.libPaths(myPaths)  # reassign them
+.libPaths()
+```
+
+############################################################################################################
+
+
+
+
+```{r}
+library(tidyverse)
+library(TSclust)
+library(gplots)
+library(dtwclust)
+library(gridExtra)
+library(ggdendro)
+library(cluster)
+library(factoextra)
+```
+
+```{r}
+boxoffice <- read.csv(file ="../preprocessed_data/first_month_boxoffice_gross_inflation_adjusted_without_outliers.csv", row.names=1, check.names=FALSE)
+boxoffice
+```
+
+```{r}
+a1 <- boxoffice["Avengers_Endgame"]
+a2 <- boxoffice["Avatar"]
+plot(dtw(a1,a2, keep=TRUE, window.type="sakoechiba", window.size=5), xaxp  = c(0,10,10), yaxp = c(0,10,10), type="twoway", col=c('blue', 'magenta'))
+```
+
+
+Robimy min-max scaling (uważam, że będzie w tym przypadku lepszy od z-normalizacji).
+```{r}
+min_max_scale <- function(x)
+{
+    return((x- min(x)) /(max(x)-min(x)))
+}
+```
+
+```{r}
+# To get a vector, use apply instead of lapply
+boxoffice_scaled <- as.data.frame(apply(X=boxoffice, MARGIN=2, FUN=min_max_scale))
+boxoffice <- boxoffice_scaled
+boxoffice
+```
+
+
+```{r}
+sample_boxoffice <- select(boxoffice, c(1:20))
+sample_boxoffice
+```
+
+```{r}
+a1 <- boxoffice["Avengers_Endgame"]
+a2 <- boxoffice["Avatar"]
+plot(dtw(a1,a2, keep=TRUE, window.type="sakoechiba", window.size=5), xaxp  = c(0,10,10), yaxp = c(0,10,10), type="twoway", col=c('blue', 'magenta'))
+```
+Nałożyłem ograniczenie sakoechiba, bo wtedy znacznie trafniej (moim eksperckim zdaniem!) się łączą weekendy.
+Nie ma sensu, żeby połączone przez DTW punkty między dwoma szeregami czasowymi były od siebie dalej niż o 7 dni, bo to oznacza, że połączyło złe tygodnie. 
+Trzeba by zrobić pętlę, która sama wybierze najlepszą wartość okna.
+
+
+```{r}
+dtw_dist <- function(x){dist(x, method="DTW", window.type="sakoechiba", window.size=5)}
+```
+
+
+```{r}
+sample_boxoffice %>%
+  as.matrix() %>%
+  gplots::heatmap.2 (
+    # dendrogram control
+    distfun = dtw_dist,
+    hclustfun = hclust,
+    dendrogram = "column",
+    Rowv = FALSE,
+    labRow = FALSE
+  )
+```
+W gałęzi po prawej dominują filmy Disneya o superbohaterach, więc może wyjdzie z tego coś sensownego :D
+
+
+```{r}
+# cluster analysis
+dist_ts <- TSclust::diss(SERIES = t(sample_boxoffice), METHOD = "DTWARP", window.type="sakoechiba", window.size=5) # note the dataframe must be transposed
+hc <- stats::hclust(dist_ts, method="complete") # method can be also "average" or diana (for DIvisive ANAlysis Clustering)
+# k for cluster which is 2 in our case (classic vs. wall)
+hclus <- stats::cutree(hc, k = 3) %>% # hclus <- cluster::pam(dist_ts, k = 2)$clustering has a similar result
+  as.data.frame(.) %>%
+  dplyr::rename(.,cluster_group = .) %>%
+  tibble::rownames_to_column("type_col")
+
+hcdata <- ggdendro::dendro_data(hc)
+names_order <- hcdata$labels$label
+# Use the folloing to remove labels from dendogram so not doubling up - but good for checking hcdata$labels$label <- ""
+
+p1 <- hcdata %>%
+  ggdendro::ggdendrogram(., rotate=TRUE, leaf_labels=FALSE)
+
+p2 <- sample_boxoffice %>%
+  dplyr::mutate(index = 1:31) %>%
+  tidyr::gather(key = type_col,value = value, -index) %>%
+  dplyr::full_join(., hclus, by = "type_col") %>% 
+  mutate(type_col = factor(type_col, levels = rev(as.character(names_order)))) %>% 
+  ggplot(aes(x = index, y = value, colour = cluster_group)) +
+  geom_line() +
+  facet_wrap(~type_col, ncol = 1, strip.position="left") + 
+  guides(color=FALSE) +
+  theme_bw() + 
+  theme(strip.background = element_blank(), strip.text = element_blank())
+
+gp1<-ggplotGrob(p1)
+gp2<-ggplotGrob(p2) 
+
+grid.arrange(gp2, gp1, ncol=2, widths=c(1,1))
+```
+
+```{r}
+kmedoids <- cluster::pam(dist_ts, k = 3)[[3]] %>%
+  as.data.frame(.) %>%
+  dplyr::rename(.,cluster_group = .) %>%
+  tibble::rownames_to_column("type_col")
+
+kmedoids
+```
+
+
+
+
+
+```{r}
+silhouette_score_medoids <- function(k){
+  kmedoids <- cluster::pam(dist_ts, k = k)
+  ss <- kmedoids$silinfo$avg.width
+  return(ss)
+}
+```
+
+
+```{r}
+dist_ts <- TSclust::diss(SERIES = t(boxoffice), METHOD = "DTWARP", window.type="sakoechiba", window.size=4)
+
+k <- 2:29
+avg_sil <- sapply(k, silhouette_score_medoids)
+plot(k, type='b', avg_sil, xlab='Number of clusters', ylab='Average Silhouette Scores', frame=FALSE)
+```
+
+```{r}
+cluster::pam(dist_ts, k = 3)$clusinfo
+```
+
+
+```{r}
+silhouette_score_hierarchical <- function(k){
+  ss <- silhouette(cutree(hc, k=k) ,dist_ts)
+  mean(ss[, 3])
+}
+```
+
+
+```{r}
+dist_ts <- TSclust::diss(SERIES = t(boxoffice), METHOD = "DTWARP", window.type="sakoechiba", window.size=4)
+hc <- stats::hclust(dist_ts, method="complete")
+k <- 2:50
+avg_sil <- sapply(k, silhouette_score_hierarchical)
+plot(k, type='b', avg_sil, xlab='Number of clusters', ylab='Average Silhouette Scores', frame=FALSE)
+```
+
+```{r}
+dist_ts <- TSclust::diss(SERIES = t(boxoffice), METHOD = "DTWARP", window.type="sakoechiba", window.size=4)
+hc <- stats::hclust(dist_ts, method="complete")
+hc_2 <- cutree(hc, k=4)
+length(hc_2[hc_2==1])
+hc_2[hc_2==1]
+```
+```{r}
+kmedoids <- cluster::pam(dist_ts, k = 3)
+kmedoids$clustering[kmedoids$clustering==3]
+```
+
+
+```{r}
+# three medoids
+m1 <- boxoffice["Fantastic_Four"]
+m2 <- boxoffice["Bruce_Almighty"]
+m3 <- boxoffice["The_Lord_of_the_Rings_The_Fellowship_of_the_Ring"]
+
+a1 <- boxoffice["Meet_the_Fockers"]
+a2 <- boxoffice["Aquaman"]
+a3 <- boxoffice["Inception"]
+b1 <- boxoffice["Avatar"]
+b2 <- boxoffice["National_Treasure_Book_of_Secrets"]
+b3 <- boxoffice["Despicable_Me"]
+plot(dtw(m3,a1, keep=TRUE, window.type="sakoechiba", window.size=0), xaxp  = c(0,10,10), yaxp = c(0,10,10), type="twoway", col=c('blue', 'magenta'))
+```
+Nieładne outliery do wyrzucenia lub poprawienia:
+American Sniper (tak naprawdę otwarcie zaczyna się dopiero na Days=8)
+Frozen (zaczyna się później)
+Lincoln (zaczyna sie pozniej)
+Mission_Impossibleâ€”Ghost_Protocol (dopiero po kilku dniach jest szerokie otwarcie)
+
+
+```{r}
+fviz_nbclust(
+  boxoffice,
+  FUNcluster = cluster::pam,
+  method = "silhouette",
+  diss = dist(boxoffice, method="DTW", window.type="sakoechiba", window.size=4),
+  k.max = 29,
+  nboot = 100,
+  verbose = interactive(),
+  barfill = "steelblue",
+  barcolor = "steelblue",
+  linecolor = "steelblue",
+  print.summary = TRUE
+)
+```
+
+```{r}
+fviz_nbclust(
+  boxoffice,
+  FUNcluster = cluster::pam,
+  method = "wss",
+  diss = dist(boxoffice, method="DTW", window.type="sakoechiba", window.size=4),
+  k.max = 29,
+  nboot = 100,
+  verbose = interactive(),
+  barfill = "steelblue",
+  barcolor = "steelblue",
+  linecolor = "steelblue",
+  print.summary = TRUE
+)
+```
+
+
